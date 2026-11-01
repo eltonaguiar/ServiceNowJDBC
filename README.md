@@ -1,3 +1,8 @@
+<img width="1665" height="548" alt="image" src="https://github.com/user-attachments/assets/94050da9-d339-4dfb-a6c0-862bb50f21c6" />
+Note in the SQL, you can't have ORDER BY or ; , if you are using the Last run database field, so the system will populate  Last run datetime
+"Don't add ORDER BY or a semicolon. On every run after the first, ServiceNow adds AND last_updated >= '...' ORDER BY last_updated ASC to the end of your query, so the query has to end with a condition it can add AND to. ServiceNow's own ORDER BY handles the sorting."
+
+
 # ServiceNowJDBC
 
 Quick-reference commands for two unrelated-but-adjacent jobs:
