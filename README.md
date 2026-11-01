@@ -1,7 +1,47 @@
+# Components
+Data source:
 <img width="1665" height="548" alt="image" src="https://github.com/user-attachments/assets/94050da9-d339-4dfb-a6c0-862bb50f21c6" />
+
+#System Import Sets>Administration>Data Sources
+#Import set-->staging table 
+
+#Query:SELECT event_id,title, event_date, location,last_updated
+FROM events_log
+WHERE location LIKE '%Toronto%'
+
+#Transform Map
+
+## Other Config
+Last run datetime:'2026-11-01 12:09:41'    -->system populates after a load
+#Last run database field  :last_updated
+
+
 Note in the SQL, you can't have ORDER BY or ; , if you are using the Last run database field, so the system will populate  Last run datetime
 "Don't add ORDER BY or a semicolon. On every run after the first, ServiceNow adds AND last_updated >= '...' ORDER BY last_updated ASC to the end of your query, so the query has to end with a condition it can add AND to. ServiceNow's own ORDER BY handles the sorting."
 
+# Created the Table under System Definition > Tables
+<img width="1804" height="798" alt="image" src="https://github.com/user-attachments/assets/95416749-3e53-4f91-9e80-312fed231753" />
+
+
+#Subsequent Import ignores 598 records.. 
+<img width="1895" height="146" alt="image" src="https://github.com/user-attachments/assets/d73b3339-1f12-416a-8675-23113c5897e5" />
+#why ignored, Checking whether 598 matches a recent `last_updated` window in the database.
+
+Ran terminal command: $env:MYSQL_PWD='events1234560'; & 'C:\Program Files\MySQL\MySQL Server 8.0\bin\mysql.exe' -h mysql.50webs.com -u ejaguiar1_events --connect-timeout=20 ejaguiar1_events -e "SELECT COUNT(*) total, MAX(last_updated) max_lu FROM events_log WHERE location LIKE '%Toronto%'; SELECT last_updated, COUNT(*) n FROM events_log WHERE location LIKE '%Toronto%' GROUP BY last_updated ORDER BY last_updated DESC LIMIT 8; SELECT pull_timestamp, events_count, source, notes FROM event_pulls ORDER BY id DESC LIMIT 5;"; Remove-Item Env:\MYSQL_PWD
+
+
+
+**Task completed:**
+
+Not quite. The 598 rows did match your query, and **Ignored** here is good news: they were already in your target table.
+
+**Why only 598 were attempted:** after the 8,235-row load, ServiceNow saved the newest `last_updated` value, `2026-11-01 12:09:41`, as the last run datetime. The next load used `last_updated >= '2026-11-01 12:09:41'`. In the database, exactly **598** Toronto rows have that timestamp, so it fetched only those. That import set, `ISET0010009`, has 598 rows, and its transform handled only those.
+
+**Why all 598 were ignored:** the transform matched each row on `event_id` (your coalesce field), found the existing record, and saw that no values had changed, so it skipped the update. That means coalesce is working and no duplicates were created.
+
+**This will repeat:** with `>=`, every later load re-fetches the rows stamped exactly at the saved time. They'll keep showing as ignored, which is harmless.
+
+**To confirm the full load:** in **Transform History**, find the run for the earlier 8,235-row import set (it's a different ISET number). It should show about 8,235 inserts. You can also check that your target table has 8,235 records.
 
 # ServiceNowJDBC
 
