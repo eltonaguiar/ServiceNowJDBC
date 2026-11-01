@@ -30,6 +30,15 @@ Note in the SQL, you can't have ORDER BY or ; , if you are using the Last run da
 
 # Created the Table under System Definition > Tables
 <img width="1804" height="798" alt="image" src="https://github.com/user-attachments/assets/95416749-3e53-4f91-9e80-312fed231753" />
+Added Index under database indexes related list at the bottom  of https://dev296154.service-now.com/now/nav/ui/classic/params/target/sys_db_object.do%3Fsys_id%3Df2070865c3509750310abf0d05013136%26sysparm_record_target%3Dsys_db_object
+<img width="1739" height="246" alt="image" src="https://github.com/user-attachments/assets/2e2f5165-87a6-4df2-92a9-6e97099f6bc8" />
+Full page looked like this:
+<img width="1307" height="855" alt="image" src="https://github.com/user-attachments/assets/719f5a5f-8683-437c-9ef0-2533d9df8def" />
+
+
+#Monitoring Run times > Load Run Time/ Load COmpleted under Import Sets https://dev296154.service-now.com/now/nav/ui/classic/params/target/sys_import_set_list.do%3Fsysparm_query%3Ddata_source.import_set_table_name%3Du_torontoevents2%5EORDERBYDESCsys_created_on
+<img width="1865" height="495" alt="image" src="https://github.com/user-attachments/assets/e997055c-a479-4181-b213-988e39e703fb" />
+
 
 
 #Subsequent Import ignores 598 records.. 
