@@ -11,6 +11,10 @@ WHERE location LIKE '%Toronto%'
 
 #Transform Map
 
+<img width="1479" height="743" alt="image" src="https://github.com/user-attachments/assets/6889c5ef-c286-49aa-b231-f167f4f6b97e" />
+Used auto-map matching Matching Fields fields  Related LInk, then  set the Coalesce to the event id
+
+
 ## Other Config
 Last run datetime:'2026-11-01 12:09:41'    -->system populates after a load
 #Last run database field  :last_updated
