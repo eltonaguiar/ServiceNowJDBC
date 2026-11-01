@@ -87,7 +87,7 @@ Linux is the primary platform here. The full MID Server install/repair runbook l
   - [Is it actually down?](#is-it-actually-down) · [The fix](#the-fix) · [Verify](#verify)
   - [If a restart isn't enough](#if-a-restart-isnt-enough) · [Why it keeps happening](#why-it-keeps-happening)
 - [3. MID Server on Windows 11 (service)](#3-mid-server-on-windows-11-service)
-- [4. Where the "service" and its configuration live — a guide for Linux newcomers](#4-where-the-service-and-its-configuration-live--a-guide-for-linux-newcomers)
+- [4. Where the "service" is — and how autostart actually works](#part-c-where-the-service-is)
   - [The three layers](#the-three-layers-top-to-bottom) · [See the full configuration](#see-the-full-configuration-the-servicesmsc-path-detail)
   - [GUI route](#gui-route-optional-for-people-who-prefer-a-file-manager) · [Changing it](#changing-the-configuration)
 - [5. Troubleshooting quick table](#5-troubleshooting-quick-table)
@@ -427,38 +427,178 @@ Unlike the Linux container, the Windows MID *does* honour *Restart MID* — the 
 
 ---
 
-## 4. Where the "service" and its configuration live — a guide for Linux newcomers
+## 4. Where the "service" is — and how autostart actually works (guide for Linux newcomers)
 
-On Windows 11 you open **`services.msc`** and get one tidy row: *ServiceNow MID Server*,
-service name `snc_mid`, **path to executable**, **log on as**, startup type. Ubuntu has no
-`services.msc`, and the MID here is not a Windows-style service at all — it is a **container**.
-Same information, different layers:
+<a id="part-c-where-the-service-is"></a>
+
+> **Written for someone whose only mental model is `services.msc`.** Every Windows concept is translated line by
+> line, and every Linux command below is followed by what it *means* in Windows terms.
+
+### ELI5 — on Windows there is **one** row, here there are **four** layers
+
+On Windows, `services.msc` gives you one row that answers everything at once: *what* runs, *as whom*, and *does it
+start at boot*. All three facts live in one object. *(ELI5: one box with one label.)*
+
+On this Linux machine the same job is split into four stacked layers, and each layer can be healthy or broken
+independently. That is the entire reason "where is the service?" feels unanswerable — the honest answer is
+"which layer do you mean?".
+
+```text
+ ┌─ layer 1 ────────────────────────────────────────────────────────────┐
+ │ systemd  →  docker.service            "is Docker itself running?"    │  ← the only real Windows-style service
+ └──────────────────────────────┬───────────────────────────────────────┘
+                                │ starts / adopts containers with a restart policy
+ ┌─ layer 2 ────────────────────▼───────────────────────────────────────┐
+ │ container  sn-mid            --restart unless-stopped                │  ← "the service instance"
+ └──────────────────────────────┬───────────────────────────────────────┘
+                                │ PID 1 inside the container = the supervisor
+ ┌─ layer 3 ────────────────────▼───────────────────────────────────────┐
+ │ /opt/mid-supervisor.sh       relaunches the JVM whenever it exits    │  ← replaces the x86-only wrapper
+ └──────────────────────────────┬───────────────────────────────────────┘
+                                │ exec
+ ┌─ layer 4 ────────────────────▼───────────────────────────────────────┐
+ │ java com.service_now.mid.Main start    -Xmx1024m  --add-opens ...     │  ← the actual MID "program"
+ └──────────────────────────────────────────────────────────────────────┘
+```
+
+| Layer | ELI5 | Windows equivalent | How to see it | Who starts it |
+|---|---|---|---|---|
+| 1 — `docker.service` | the engine that runs containers | a service with *Startup type: Automatic* | `systemctl status docker` | **systemd** (at boot, because it is *enabled*) |
+| 2 — container `sn-mid` | one running "instance" of the MID | the service *instance* | `docker ps -a` | the Docker engine (at boot, because of the restart policy) |
+| 3 — `/opt/mid-supervisor.sh` | babysitter that restarts the program | *Recovery → Restart the service* | `docker exec sn-mid pgrep -af mid-supervisor` | container `CMD` (PID 1) |
+| 4 — `java … mid.Main start` | the program itself | *Path to executable* | `docker exec sn-mid pgrep -af service_now.mid.Main` | the supervisor (layer 3) |
+
+**So, "where is the service?"** — there is deliberately **no `sn-mid.service`** file on this box. The autostart
+chain is: *systemd* starts `docker.service` → Docker starts the container because of `--restart unless-stopped` →
+the container runs `mid-supervisor.sh` → the supervisor runs the JVM. Delete any one link and the MID does not come
+back after a reboot; the other three still *look* fine, which is exactly how people end up staring at a "Down" MID.
+
+### Auto-start: how Windows does it vs how Linux does it
+
+Windows has one mechanism: **Startup type** (*Automatic* / *Manual* / *Disabled*) plus the **Recovery** tab
+(restart-on-failure). Linux splits that into two mechanisms that get confused constantly:
+
+1. **`systemctl enable`** — "start this at boot". This is literally *Startup type: Automatic*. It creates a symlink
+   under `/etc/systemd/system/multi-user.target.wants/`; nothing in the unit changes, the link is the switch.
+2. **Docker restart policies** — "if this container exits, start it again". `unless-stopped` also means "when the
+   engine comes up at boot, bring this container up too".
+3. **Inside the container**, something has to supervise the program. In Windows the wrapper does that; here
+   `mid-supervisor.sh` does, because the wrapper is x86-only.
+
+| Question | Windows answer | Answer on this box | Command |
+|---|---|---|---|
+| Does it start at boot? | Startup type: Automatic | `docker.service` is enabled **and** the container's policy is `unless-stopped` | see the 3-line check below |
+| Does it restart if it crashes? | Recovery → Restart | supervisor relaunches the JVM (10 s, then 60 s after 3 fast crashes) | `grep '\[supervisor\]' …/console.log` |
+| Does "Stop" survive a reboot? | Yes, until you set Automatic again | Yes — `unless-stopped` means exactly "don't bring it back if a human stopped it" | `docker stop sn-mid` |
+| Can I start it by hand? | `net start snc_mid` | `docker start sn-mid` | — |
+
+**The three-line check** — run it after every reboot, or whenever the instance says *Down*:
+
+```bash
+# LAYER 1 — "is the engine set to start at boot?"   (Windows: Startup type)
+systemctl is-enabled docker      # -> enabled   (disabled = the container can never come up at boot)
+systemctl is-active docker       # -> active    (running right now)
+
+# LAYER 2 — "will this container be brought back?"  (Windows: Recovery / Automatic)
+docker inspect sn-mid --format '{{.HostConfig.RestartPolicy.Name}}'   # -> unless-stopped
+docker inspect sn-mid --format '{{.State.Status}} since {{.State.StartedAt}}'
+
+# LAYERS 3+4 — "is the program actually running inside it?"
+#   (the container can be "Up" with nothing but a `tail` alive — this is the classic false green)
+docker exec sn-mid pgrep -af service_now.mid.Main || echo "JVM DEAD - restart: docker restart sn-mid"
+```
+
+*(ELI5: layer 1 says the building has power, layer 2 says your office is rented, layer 3 says somebody is actually
+sitting in it. Windows hides all three in one row of `services.msc`.)*
+
+**If layer 1 is missing** (fresh Docker install, or someone disabled it):
+
+```bash
+sudo systemctl enable --now docker    # = set Startup type to Automatic AND start it now
+systemctl is-enabled docker           # -> enabled
+```
+
+**If layer 2 is missing** (`RestartPolicy` is `no` or empty — e.g. the container was created without `--restart`):
+
+```bash
+docker update --restart unless-stopped sn-mid     # change it in place, no need to recreate the container
+docker inspect sn-mid --format '{{.HostConfig.RestartPolicy.Name}}'   # -> unless-stopped
+```
+
+Same effect as editing *Recovery* in Windows service properties — and it needs no restart of anything.
+
+### Optional: a real `sn-mid.service` (one row, like `services.msc`)
+
+If you would rather have a single object you can `systemctl status` and see on boot, wrap the container in a unit.
+This is the Linux equivalent of "create the service entry":
+
+```bash
+sudo tee /etc/systemd/system/sn-mid.service >/dev/null <<'EOF'
+[Unit]
+Description=ServiceNow MID Server (ARM64 container sn-mid)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Restart=always
+RestartSec=10
+ExecStart=/usr/bin/docker start -a sn-mid
+ExecStop=/usr/bin/docker stop -t 30 sn-mid
+TimeoutStartSec=0
+
+[Install]
+WantedBy=multi-user.target
+EOF
+```
+
+Then:
+
+```bash
+sudo systemctl daemon-reload          # make systemd notice the new file (always after editing units)
+sudo systemctl enable --now sn-mid     # Startup type: Automatic + start it now
+systemctl status sn-mid --no-pager     # the services.msc "row": state, PID-less, recent log lines
+systemctl is-enabled sn-mid            # -> enabled
+```
+
+Two cautions, both learned the hard way:
+
+- **Do not run both supervisors.** If you add this unit, set the container policy to `no`
+  (`docker update --restart no sn-mid`), otherwise systemd and the Docker engine both think they own the container.
+  With the unit in place, *Recovery → Restart* comes from `Restart=always`, not from Docker.
+- **`ExecStart` must attach** (`docker start -a`). A plain `docker start` returns immediately, so systemd thinks the
+  service exited and restart-loops it. *(ELI5: don't hand the job to someone who leaves before it's finished.)*
+
+**Test that autostart really works** — do this once, on purpose, rather than discovering it during an outage:
+
+```bash
+sudo reboot
+# ...after it comes back:
+systemctl is-enabled docker && docker ps --filter name=sn-mid --format '{{.Status}}'
+curl -s -u "$SN_USER:$SN_PASS" \
+  "https://$SN_HOST/api/now/table/ecc_agent?sysparm_query=nameLIKEgx10&sysparm_fields=name,status,validated,last_refreshed"
+# expect: docker enabled, container "Up …", instance status=Up validated=true
+```
+
+### `services.msc`, field by field → Linux equivalent
 
 | Windows `services.msc` shows | Linux / Docker equivalent | Command |
 |---|---|---|
 | The service list | running containers + systemd services | `docker ps -a` / `systemctl list-units --type=service --state=running` |
 | Service name `snc_mid` | container **`sn-mid`**, kept alive by systemd unit `docker.service` | `docker ps -a --filter name=sn-mid` |
-| Path to executable | the container's `Path` + `Args` (`/bin/bash -c "…supervisor… tail"`) | `docker inspect sn-mid --format '{{.Path}} {{.Args}}'` |
-| Log On As: Local System | `Config.User=root`; the JVM inside drops to user **`mid`** (uid 999) | `docker inspect sn-mid --format '{{.Config.User}}'` |
-| Startup type: Automatic | `RestartPolicy=unless-stopped` (plus `docker.service` enabled) | `docker inspect sn-mid --format '{{.HostConfig.RestartPolicy.Name}}'` |
-| Start / Stop / Restart buttons | `docker start` / `stop` / `restart sn-mid` | same |
-| Program parameters / config | `/opt/agent/config.xml` inside the container | `docker exec sn-mid cat /opt/agent/config.xml` |
+| Display name *ServiceNow MID Server* | container `Name` / the MID name shown in the instance (`gx10-mid`) | `docker inspect sn-mid --format '{{.Name}}'` |
+| *Path to executable* | the container's `Path` + `Args` (`/bin/bash -c "…supervisor… tail"`) | `docker inspect sn-mid --format '{{.Path}} {{.Args}}'` |
+| *Start in* (working directory) | `Config.WorkingDir` | `docker inspect sn-mid --format '{{.Config.WorkingDir}}'` |
+| *Log On As: Local System* | `Config.User=root`; the JVM inside drops to user **`mid`** (uid 999) | `docker inspect sn-mid --format '{{.Config.User}}'` |
+| *Startup type: Automatic* | `RestartPolicy=unless-stopped` (plus `docker.service` enabled) | `docker inspect sn-mid --format '{{.HostConfig.RestartPolicy.Name}}'` |
+| *Start / Stop / Restart* buttons | `docker start` / `stop` / `restart sn-mid` | same |
+| *Program parameters* / config file | `/opt/agent/config.xml` inside the container | `docker exec sn-mid cat /opt/agent/config.xml` |
+| *Environment variables* | `Config.Env` (`MID_XMX`, `OPENS`) | `docker inspect sn-mid --format '{{range .Config.Env}}{{println .}}{{end}}'` |
+| *Dependencies* tab | `Requires=docker.service` / `After=…` in the unit, or `docker inspect` `Mounts` for volumes | `docker inspect sn-mid --format '{{range .Mounts}}{{.Name}} -> {{.Destination}}{{"\n"}}{{end}}'` |
+| *Event Viewer* → Application log | `/opt/agent/logs/agent0.log.0` (MID log) + `/opt/agent/logs/console.log` (supervisor) | `docker exec sn-mid tail -50 /opt/agent/logs/agent0.log.0` |
+| *Recovery* tab | supervisor loop; `Restart=always` if you installed the unit | `grep '\[supervisor\]' …/console.log` |
 
-### The three layers, top to bottom
-
-```text
-systemd  ── docker.service            <- "the service" from Ubuntu's point of view
-             └── container sn-mid     <- restart: unless-stopped
-                   └── /opt/mid-supervisor.sh
-                         └── java com.service_now.mid.Main start   <- the actual MID
-```
-
-1. **systemd** keeps the Docker engine running — `systemctl status docker`.
-2. **Docker** keeps the container alive — `docker ps -a`.
-3. **the supervisor + java** inside the container run the MID. This is the layer that dies
-   silently while the first two still look healthy (see [Why it keeps happening](#why-it-keeps-happening)).
-
-### See the full configuration (the services.msc "Path" detail)
+### See the full configuration (the `services.msc` "Path" detail)
 
 ```bash
 # everything at once: how it starts, as which user, which volumes, restart policy
@@ -480,8 +620,7 @@ docker inspect sn-mid --format '{{range .Mounts}}{{.Type}} {{.Name}} -> {{.Desti
 docker inspect sn-mid --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -E 'MID_XMX|OPENS'
 ```
 
-The MID's own settings file is `/opt/agent/config.xml` — instance URL, MID user, MID name,
-threads, proxy:
+The MID's own settings file is `/opt/agent/config.xml` — instance URL, MID user, MID name, threads, proxy:
 
 ```bash
 # the whole file
@@ -503,26 +642,27 @@ sudo ls -l /var/lib/docker/volumes/mid_data/_data/logs/     # agent0.log.0 lives
 
 ### GUI route (optional, for people who prefer a file manager)
 
-Ubuntu has no built-in `services.msc`. What you can still do:
+Ubuntu has no built-in `services.msc`. _(ELI5: there is no single window that lists everything, because "everything"
+is four layers.)_ What you can still do:
 
-- **Terminal** — `Ctrl`+`Alt`+`T`, or Activities → type “Terminal”. This is the real tool;
-  everything below is convenience only.
-- **Processes** — open “System Monitor” (`gnome-system-monitor`). You will see `java`,
-  `dockerd`, `containerd`. Right-click → *End* is the GUI version of “Stop”.
-- **Docker Desktop for Linux** *(if you install it)* — shows the container, its start command,
-  exit state and live logs in a window. Closest visual match to `services.msc`.
+- **Terminal** — `Ctrl`+`Alt`+`T`, or Activities → type "Terminal". This is the real tool; everything below is
+  convenience only.
+- **Docker Desktop for Linux** *(if you install it)* — shows the container, its start command, exit state and live
+  logs in a window. Closest visual match to `services.msc` for layer 2.
+- **Processes** — open "System Monitor" (`gnome-system-monitor`). You will see `java`, `dockerd`, `containerd`.
+  Right-click → *End* is the GUI version of "Stop".
 - **Files (Nautilus)** — browse the volume as root:
-  `sudo -E nautilus /var/lib/docker/volumes/mid_data/_data &` — handy for reading
-  `config.xml` and `logs/` in a text editor.
+  `sudo -E nautilus /var/lib/docker/volumes/mid_data/_data &` — handy for reading `config.xml` and `logs/` in a
+  text editor.
 - **Settings** (`gnome-control-center`) manages *nothing* here — no services, no containers.
-- Optional GUI service managers, not preinstalled: `sudo apt install stacer` (or
-  `systemd-manager`). These list **systemd** units, so they show `docker.service` but **not**
-  the MID container.
+- Optional GUI service managers, not preinstalled: `sudo apt install stacer` (or `systemd-manager`). These list
+  **systemd** units, so they show `docker.service` (and `sn-mid.service` if you added it) but **not** the container.
 
-### Changing the configuration
+### Changing the configuration — safely
 
-Don't hand-edit credentials into `config.xml` — the setup script regenerates that file, and a
-half-edited one causes the keystore / 401 failures described in section 2. Supported route:
+Don't hand-edit credentials into `config.xml`. The setup script regenerates that file *and* re-derives the keystore
+from it; a half-edited file is what produces the `UnrecoverableKeyException` / `401` pair described in section 2.
+_(ELI5: two locks share one key — change one by hand and the other stops opening.)_ Supported route:
 
 ```bash
 export SN_HOST="dev296154.service-now.com" MID_USER="mid.server" MID_NAME="gx10-mid"
@@ -530,8 +670,7 @@ read -rsp "MID user password: " MID_PASS; export MID_PASS
 bash ./setup-mid-fast.sh     # regenerates config.xml, clears keystore, relaunches, polls
 ```
 
-For something the script doesn't cover (thread count, proxy), copy the file out, edit, put it
-back, restart:
+For something the script doesn't cover (thread count, proxy), copy the file out, edit, put it back, restart:
 
 ```bash
 docker cp sn-mid:/opt/agent/config.xml ./config.xml
@@ -540,6 +679,11 @@ docker cp ./config.xml sn-mid:/opt/agent/config.xml
 docker restart sn-mid
 ```
 
+**Never use the instance's "Restart MID" button on this box** — a wrapper-less MID cannot restart itself, so it
+shuts down and stays down while `docker ps` still says *Up*. `docker restart sn-mid` is the correct action; see
+[Why it keeps happening](#why-it-keeps-happening) and the
+[recovery runbook](https://github.com/eltonaguiar/ServiceNowMidServer#recovering-a-down-mid--the-runbook-we-actually-ran).
+
 ### Open a shell inside the container (the closest thing to RDP)
 
 ```bash
@@ -547,6 +691,16 @@ docker exec -it sn-mid bash      # or: sh
 pwd                              # /opt/agent
 ls                               # config.xml  logs/  lib/  extlib/  work/  security/
 ```
+
+### TL;DR of this section
+
+- There is **no `sn-mid.service`**. The "service" is four layers: `docker.service` → container `sn-mid` →
+  `mid-supervisor.sh` → `java … mid.Main start`.
+- Boot autostart needs **two** things: `systemctl is-enabled docker` = `enabled`, **and** the container's
+  `RestartPolicy` = `unless-stopped`. Either one missing = no MID after a reboot.
+- Restart-on-crash is the **supervisor** (10 s, backing off to 60 s), not Docker — Docker only sees the supervisor.
+- Want a single `services.msc`-style row? Add the optional unit, and switch the container policy to `no` so two
+  supervisors don't fight.
 
 ## 5. Troubleshooting quick table
 
