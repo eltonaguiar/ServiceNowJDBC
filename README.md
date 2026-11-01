@@ -35,17 +35,85 @@ Linux is the primary platform. The full MID Server install/repair runbook lives 
 ## A. Build order — how the JDBC import was wired
 
 The import is a chain, and every link is a record: **data source → import set table → transform map → target table →
-scheduled import**. Build in that order; nothing below depends on a later step.
+scheduled import**. Build in that order; nothing below depends on a later step. Each step gives the page to stand on,
+what to have ready first, the fields to fill, and the one suggestion that saves rework.
 
-| # | Page (breadcrumb) | What we did | Why here | Checkpoint |
-|---|---|---|---|---|
-| 1 | **All → System Import Sets → Data Sources → New** | `torontoeventsv2`: type **JDBC**, driver `org.mariadb.jdbc.Driver`, `jdbc:mysql://mysql.50webs.com:3306/ejaguiar1_events`, user `ejaguiar1_events`, **MID `win11-mid`**, Query = *Specific SQL* | nothing runs without a source | **Test Load 20 Records** returns columns |
-| 2 | (same form) *Use last run datetime* + *Last run database field* | `true` + `last_updated` | this is what makes the import incremental | the preview shows `last_updated >= …` appended |
-| 3 | (same form) *Import set table name* | `u_torontoevents2` | rows land in staging before any transform | staging table exists after a test load |
-| 4 | **All → System Import Sets → Transform Maps → New** | `TorontoEventsTransformMap`: `u_torontoevents2` → `u_torontoeventsfinal`, **Mapping Assist** for the 5 fields, **coalesce `u_event_id`**, date format `yyyy-MM-dd HH:mm:ss` | final shape + the dedupe key | **Run Transform** moves the test rows |
-| 5 | **All → System Definition → Tables** | target `u_torontoeventsfinal`: `u_event_id` string(64), `u_title`/`u_location` string(500), `u_event_date` date/time, `u_last_updated` **string(40)** | the transform needs the columns before it can map them | dictionary lists all five |
-| 6 | Data source form → **Scheduled Import** (Run / Time) | daily | hands the cadence to the platform | one `sys_import_set_run` row per run |
-| 7 | **All → System Import Sets → Import Sets** | read the `TH…` history | the only place showing inserted vs updated per run | `state = complete`, counts sane |
+### Step 1 — Data Source
+> **Breadcrumb:** `All → System Import Sets → Data Sources → New`
+
+- **Prerequisite:** a **Validated** MID Server that can reach the database host on `3306`, and a DB user granted for
+  *the MID's* IP (`'user'@'%'` or the MID subnet) — the SQL runs from the MID's network, not the instance's.
+- **Fields to fill:** `Name` = `torontoeventsv2` · `Type` = JDBC · `JDBC Driver Class` =
+  `org.mariadb.jdbc.Driver` · `Connection URL` = `jdbc:mysql://mysql.50webs.com:3306/ejaguiar1_events` ·
+  `Database user` / `Database password` · `MID Server` = `win11-mid` · `Query type` = *Specific SQL* · `SQL
+  statement` = the query in [section B step 1](#step-1--the-data-source).
+- **Suggestion:** use **Test Load 20 Records** here, not the full query — it proves driver, URL, network and grants
+  before you move 8,000 rows.
+- **Checkpoint:** the test load returns columns.
+
+### Step 2 — the watermark, on the same form
+> **Breadcrumb:** same Data Source form, *Data Load Type* / advanced fields
+
+- **Prerequisite:** the SQL **selects `last_updated`**; without that column in the result there is nothing to compare.
+- **Fields to fill:** `Use last run datetime` = `true` · `Last run database field` = `last_updated` ·
+  `Last run datetime` = **leave empty** (the platform fills it after the first successful run).
+- **Suggestion:** never add `ORDER BY` or a trailing `;` to the SQL, and never filter on `last_updated` yourself —
+  ServiceNow appends `AND last_updated >= '…' ORDER BY last_updated ASC` and the two clauses fight.
+- **Checkpoint:** the preview shows the watermark clause appended.
+
+### Step 3 — the staging table, on the same form
+> **Breadcrumb:** same Data Source form → `Import set table name`
+
+- **Prerequisite:** none.
+- **Fields to fill:** `Import set table name` = `u_torontoevents2` (a name you can recognise later in Import Sets).
+- **Suggestion:** let ServiceNow create it; give it a `u_` prefix so it is obviously custom, and do not clean it
+  between runs — it is the audit trail of what actually arrived.
+- **Checkpoint:** the staging table exists after the test load.
+
+### Step 4 — Transform Map
+> **Breadcrumb:** `All → System Import Sets → Transform Maps → New`
+
+- **Prerequisite:** staged rows to transform, and the **target table already created** (step 5 — do it first if it
+  does not exist yet).
+- **Fields to fill:** `Name` = `TorontoEventsTransformMap` · `Source table` = `u_torontoevents2` ·
+  `Target table` = `u_torontoeventsfinal` · `Run business rules` = **off** · mappings via **Auto Map Matching
+  Fields** (the *Related Link*) · per-entry `Date format` = `yyyy-MM-dd HH:mm:ss` · **`Coalesce` = true on
+  `u_event_id`**.
+- **Suggestion:** get the coalesce key right **before** the first big load. Retrofitting it means deleting
+  duplicates by hand; adding it later cannot undo what is already there.
+- **Checkpoint:** **Run Transform** on the test rows inserts, and running it again updates instead of duplicating.
+
+### Step 5 — Target table
+> **Breadcrumb:** `All → System Definition → Tables` → New
+
+- **Prerequisite:** none — but create it **before** step 4 so the transform has somewhere to map to.
+- **Fields to fill:** `Label` = Toronto Events · `Name` = `u_torontoeventsfinal` · `Extends` = (none) ·
+  `Columns`: `u_event_id` string(64), `u_title` string(500), `u_location` string(500), `u_event_date` date/time,
+  `u_last_updated` **string(40)**.
+- **Suggestion:** add a database index on `u_event_id` from the *Database Indexes* related list — it is the column
+  every coalesce lookup hits. Keep `u_last_updated` a string; it carries MySQL's text verbatim, so do date maths in a
+  transform script.
+- **Checkpoint:** all five columns show in the dictionary.
+
+### Step 6 — Scheduled Import
+> **Breadcrumb:** Data Source form → **Scheduled Import**
+
+- **Prerequisite:** one successful manual load (a `TH…` import set in `complete`), so the watermark has a value.
+- **Fields to fill:** `Run` = *Daily* · `Time` = the hour your source data has settled · `Time zone` = the zone you
+  actually mean (the trigger stores what you pick).
+- **Suggestion:** schedule it *after* the upstream MySQL load, and leave an hour of slack — an import that starts
+  while the scraper is still writing will simply miss the tail of the batch until tomorrow.
+- **Checkpoint:** one `sys_import_set_run` row per scheduled execution.
+
+### Step 7 — Import Sets (verification)
+> **Breadcrumb:** `All → System Import Sets → Import Sets`
+
+- **Prerequisite:** at least one run.
+- **Fields to fill:** none — read-only.
+- **Suggestion:** the funnel is `Load Run Time` (fetch) → `Import Set Rows` (arrived) → transform result
+  (inserted / updated / ignored). Read all three; "Ignored" is usually success, not failure (see
+  [section B step 5](#step-5--the-delta-behaviour-on-the-second-load)).
+- **Checkpoint:** `state = complete`, counts sane.
 
 Roles: `import_admin`/`admin` to build. The MID must reach the database host on **3306** — the SQL runs from the MID's
 network, not the instance's.
