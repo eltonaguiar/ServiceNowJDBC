@@ -1,99 +1,33 @@
-# Components
-Data source:
-<img width="1665" height="548" alt="image" src="https://github.com/user-attachments/assets/94050da9-d339-4dfb-a6c0-862bb50f21c6" />
-
-#System Import Sets>Administration>Data Sources
-#Import set-->staging table 
-
-#Query:SELECT event_id,title, event_date, location,last_updated
-FROM events_log
-WHERE location LIKE '%Toronto%'
-
-#Transform Map
-
-<img width="1479" height="743" alt="image" src="https://github.com/user-attachments/assets/6889c5ef-c286-49aa-b231-f167f4f6b97e" />
-Used auto-map matching Matching Fields fields  Related LInk, then  set the Coalesce to the event id
-
-
-## Other Config
-Last run datetime:'2026-11-01 12:09:41'    -->system populates after a load
-#Last run database field  :last_updated
-
-#Logs
-under this page
-https://dev296154.service-now.com/now/nav/ui/classic/params/target/sys_import_set.do%3Fsysparm_query%3Dnumber%3DISET0010009
-Import Set Runs
-<img width="1739" height="282" alt="image" src="https://github.com/user-attachments/assets/e0bb1454-2572-4edc-aadc-2ba059c2f79c" />
-Import Set Rows
-<img width="1649" height="491" alt="image" src="https://github.com/user-attachments/assets/c540fc10-feaf-4a1e-8f2c-f87adacf7bea" />
-
-
-
-Note in the SQL, you can't have ORDER BY or ; , if you are using the Last run database field, so the system will populate  Last run datetime
-"Don't add ORDER BY or a semicolon. On every run after the first, ServiceNow adds AND last_updated >= '...' ORDER BY last_updated ASC to the end of your query, so the query has to end with a condition it can add AND to. ServiceNow's own ORDER BY handles the sorting."
-
-# Created the Table under System Definition > Tables
-<img width="1804" height="798" alt="image" src="https://github.com/user-attachments/assets/95416749-3e53-4f91-9e80-312fed231753" />
-Added Index under database indexes related list at the bottom  of https://dev296154.service-now.com/now/nav/ui/classic/params/target/sys_db_object.do%3Fsys_id%3Df2070865c3509750310abf0d05013136%26sysparm_record_target%3Dsys_db_object
-<img width="1739" height="246" alt="image" src="https://github.com/user-attachments/assets/2e2f5165-87a6-4df2-92a9-6e97099f6bc8" />
-Full page looked like this:
-<img width="1307" height="855" alt="image" src="https://github.com/user-attachments/assets/719f5a5f-8683-437c-9ef0-2533d9df8def" />
-
-
-#Monitoring Run times > Load Run Time/ Load COmpleted under Import Sets https://dev296154.service-now.com/now/nav/ui/classic/params/target/sys_import_set_list.do%3Fsysparm_query%3Ddata_source.import_set_table_name%3Du_torontoevents2%5EORDERBYDESCsys_created_on
-<img width="1865" height="495" alt="image" src="https://github.com/user-attachments/assets/e997055c-a479-4181-b213-988e39e703fb" />
-
-
-#Subsequent Import ignores 598 records.. 
-<img width="1895" height="146" alt="image" src="https://github.com/user-attachments/assets/d73b3339-1f12-416a-8675-23113c5897e5" />
-#why ignored, Checking whether 598 matches a recent `last_updated` window in the database.
-
-Ran terminal command: $env:MYSQL_PWD='events1234560'; & 'C:\Program Files\MySQL\MySQL Server 8.0\bin\mysql.exe' -h mysql.50webs.com -u ejaguiar1_events --connect-timeout=20 ejaguiar1_events -e "SELECT COUNT(*) total, MAX(last_updated) max_lu FROM events_log WHERE location LIKE '%Toronto%'; SELECT last_updated, COUNT(*) n FROM events_log WHERE location LIKE '%Toronto%' GROUP BY last_updated ORDER BY last_updated DESC LIMIT 8; SELECT pull_timestamp, events_count, source, notes FROM event_pulls ORDER BY id DESC LIMIT 5;"; Remove-Item Env:\MYSQL_PWD
-
-#Scheduled Data Imports
-https://dev296154.service-now.com/now/event_jobs/record/sys_trigger/27dfc069c3d09750310abf0d050131e2
-<img width="1774" height="184" alt="image" src="https://github.com/user-attachments/assets/05ec935d-64b2-4715-8b2b-4045a3bfc17a" />
-e.g. daily at midnight
-<img width="1687" height="597" alt="image" src="https://github.com/user-attachments/assets/325cc74c-7853-4e55-b853-770e08699202" />
-
-
-
-
-**Task completed:**
-
-Not quite. The 598 rows did match your query, and **Ignored** here is good news: they were already in your target table.
-
-**Why only 598 were attempted:** after the 8,235-row load, ServiceNow saved the newest `last_updated` value, `2026-11-01 12:09:41`, as the last run datetime. The next load used `last_updated >= '2026-11-01 12:09:41'`. In the database, exactly **598** Toronto rows have that timestamp, so it fetched only those. That import set, `ISET0010009`, has 598 rows, and its transform handled only those.
-
-**Why all 598 were ignored:** the transform matched each row on `event_id` (your coalesce field), found the existing record, and saw that no values had changed, so it skipped the update. That means coalesce is working and no duplicates were created.
-
-**This will repeat:** with `>=`, every later load re-fetches the rows stamped exactly at the saved time. They'll keep showing as ignored, which is harmless.
-
-**To confirm the full load:** in **Transform History**, find the run for the earlier 8,235-row import set (it's a different ISET number). It should show about 8,235 inserts. You can also check that your target table has 8,235 records.
-
 # ServiceNowJDBC
 
-Quick-reference commands for two unrelated-but-adjacent jobs:
+How the Toronto events data gets **from MySQL into ServiceNow over JDBC**, the commands for **querying that
+database**, and the runbook for **keeping the MID Server that does the work alive**. Everything here was run against
+a live instance — the screenshots are the real configuration, not a diagram of it.
 
-1. **Querying the events database** (`ejaguiar1_events`) from a shell.
-2. **Bringing a ServiceNow MID Server back up** — Linux (Docker/ARM64) first, Windows at the end.
-
-Linux is the primary platform here. The full MID Server install/repair runbook lives in
+Linux is the primary platform. The full MID Server install/repair runbook lives in
 [`eltonaguiar/ServiceNowMidServer`](https://github.com/eltonaguiar/ServiceNowMidServer).
 
 ## Contents
 
-- [A. Build order — how the JDBC import was wired](#a-build-order--how-the-jdbc-import-was-wired)
+- [A. Build order — how the JDBC import was wired](#a-build-order--how-the-jdbc-import-was-wired) — the records to
+  create, in order, with the UI path for each
+- [B. The same build, in screenshots](#b-the-same-build-in-screenshots) — the same steps as pictures, captioned, in
+  the same order
 - [1. Events database (MySQL)](#1-events-database-mysql)
-  - [How the import stays idempotent (and only takes newer rows)](#how-the-import-stays-idempotent-and-only-takes-newer-rows)
-  - [Linux](#linux) · [Windows](#windows) · [Queries worth knowing](#queries-worth-knowing)
+  - [Connecting — the two rules that trip everyone up](#connecting--the-two-rules-that-trip-everyone-up)
+  - [Queries worth knowing](#queries-worth-knowing) ·
+    [How the import stays idempotent](#how-the-import-stays-idempotent-and-only-takes-newer-rows)
 - [2. MID Server on Linux (Docker, ARM64 / NVIDIA GX10)](#2-mid-server-on-linux-docker-arm64--nvidia-gx10)
   - [Is it actually down?](#is-it-actually-down) · [The fix](#the-fix) · [Verify](#verify)
   - [If a restart isn't enough](#if-a-restart-isnt-enough) · [Why it keeps happening](#why-it-keeps-happening)
 - [3. MID Server on Windows 11 (service)](#3-mid-server-on-windows-11-service)
 - [4. Where the "service" is — and how autostart actually works](#part-c-where-the-service-is)
-  - [The three layers](#the-three-layers-top-to-bottom) · [See the full configuration](#see-the-full-configuration-the-servicesmsc-path-detail)
-  - [GUI route](#gui-route-optional-for-people-who-prefer-a-file-manager) · [Changing it](#changing-the-configuration)
+  - [The four layers](#eli5--on-windows-there-is-one-row-here-there-are-four-layers) ·
+    [Auto-start](#auto-start-how-windows-does-it-vs-how-linux-does-it) ·
+    [`services.msc` field by field](#servicesmsc-field-by-field--linux-equivalent)
+  - [See the full configuration](#see-the-full-configuration-the-servicesmsc-path-detail) ·
+    [GUI route](#gui-route-optional-for-people-who-prefer-a-file-manager) ·
+    [Changing it](#changing-the-configuration--safely)
 - [5. Troubleshooting quick table](#5-troubleshooting-quick-table)
 
 ---
@@ -162,6 +96,163 @@ curl -s -u "$SN_USER:$SN_PASS" "https://<instance>/api/now/table/sys_data_source
 mysql -h mysql.50webs.com -u ejaguiar1_events -p -e \
   "SELECT COUNT(*) AS src_rows, MAX(last_updated) AS src_max FROM ejaguiar1_events.events_log WHERE location LIKE '%Toronto%';"
 ```
+
+---
+
+## B. The same build, in screenshots
+
+Walk these in order and you end up with the same pipeline as [section A](#a-build-order--how-the-jdbc-import-was-wired).
+Every picture carries a **step label** (`1A`, `2A`, …) and the **breadcrumb** you need to be standing on to see it:
+
+| Label | Step | Screenshots |
+|---|---|---|
+| **1** | the data source | `1A` |
+| **2** | the transform map | `2A` |
+| **3** | the target table | `3A` `3B` `3C` |
+| **4** | the first load, and where to watch it | `4A` `4B` `4C` |
+| **5** | the delta behaviour on later loads | `5A` |
+| **6** | the schedule | `6A` `6B` |
+
+The letters are ordering within a step, so `3A → 3B → 3C` is always the intended reading order.
+
+### Step 1 — the data source
+
+**Screenshot 1A · Data source form** — type, driver, MID, query mode, staging table
+
+> `All → System Import Sets → Administration → Data Sources` → `torontoeventsv2`
+
+<img width="1665" height="548" alt="Screenshot 1A - data source torontoeventsv2: type JDBC, driver org.mariadb.jdbc.Driver, MID win11-mid, Query = Specific SQL" src="https://github.com/user-attachments/assets/94050da9-d339-4dfb-a6c0-862bb50f21c6" />
+
+*Shows:* **type JDBC**, `org.mariadb.jdbc.Driver`, the **MID Server `win11-mid`** (this is the field that decides
+which network the SQL runs from), **Query = Specific SQL**, and the staging table `u_torontoevents2` that rows land
+in before any transform.
+
+The query — explicit column list, a `LIKE` filter, and **`last_updated` included**, because the delta has nothing to
+compare without it:
+
+```sql
+SELECT event_id, title, event_date, location, last_updated
+FROM events_log
+WHERE location LIKE '%Toronto%'
+```
+
+> ⚠️ **No `ORDER BY`, no trailing semicolon.** With *Last run database field* set, ServiceNow appends
+> `AND last_updated >= '…' ORDER BY last_updated ASC` on every run after the first — so the statement must end with a
+> condition it can bolt `AND` onto, and ServiceNow owns the sorting.
+
+### Step 2 — the transform map
+
+**Screenshot 2A · Transform map** — field mapping and the coalesce key
+
+> `All → System Import Sets → Transform Maps` → `TorontoEventsTransformMap`
+
+<img width="1479" height="743" alt="Screenshot 2A - transform map TorontoEventsTransformMap mapping staging fields to u_torontoeventsfinal" src="https://github.com/user-attachments/assets/6889c5ef-c286-49aa-b231-f167f4f6b97e" />
+
+*Shows:* the mapping from `u_torontoevents2` to `u_torontoeventsfinal`, built with **Auto Map Matching Fields** (the
+*Related Link*), and the one setting that does all the work — **Coalesce = true on `u_event_id`**. That is what turns
+a re-delivered row into an update instead of a duplicate.
+
+**The two delta settings live back on the 1A form:**
+
+| Field | Value | Who sets it |
+|---|---|---|
+| *Use last run datetime* | on | you |
+| *Last run database field* | `last_updated` | you |
+| *Last run datetime* | `2026-11-01 12:09:41` | **the system, after each successful run — never type it** |
+
+### Step 3 — the target table
+
+**Screenshot 3A · Table record** — columns, including the string `u_last_updated`
+
+> `All → System Definition → Tables` → `u_torontoeventsfinal`
+
+<img width="1804" height="798" alt="Screenshot 3A - u_torontoeventsfinal table record and its columns" src="https://github.com/user-attachments/assets/95416749-3e53-4f91-9e80-312fed231753" />
+
+*Shows:* `u_event_id`, `u_title`, `u_location`, `u_event_date`, and **`u_last_updated` as string(40)** — MySQL text
+carried through untouched, so do date maths in the transform, not on the column.
+
+**Screenshot 3B · Database Indexes related list** — the index on the coalesce key
+
+> Same record, scrolled to **Database Indexes** at the bottom
+> ([open it](https://dev296154.service-now.com/now/nav/ui/classic/params/target/sys_db_object.do%3Fsys_id%3Df2070865c3509750310abf0d05013136%26sysparm_record_target%3Dsys_db_object))
+
+<img width="1739" height="246" alt="Screenshot 3B - Database Indexes related list on the table record" src="https://github.com/user-attachments/assets/2e2f5165-87a6-4df2-92a9-6e97099f6bc8" />
+
+**Screenshot 3C · the full table form** — for side-by-side comparison with yours
+
+<img width="1307" height="855" alt="Screenshot 3C - full u_torontoeventsfinal table form" src="https://github.com/user-attachments/assets/719f5a5f-8683-437c-9ef0-2533d9df8def" />
+
+### Step 4 — the first load, and where to watch it
+
+**Screenshot 4A · Import set list** — `Load Run Time` and `Load Completed`
+
+> `All → Import Sets`, filtered to the staging table
+> ([this instance](https://dev296154.service-now.com/now/nav/ui/classic/params/target/sys_import_set_list.do%3Fsysparm_query%3Ddata_source.import_set_table_name%3Du_torontoevents2%5EORDERBYDESCsys_created_on), newest first)
+
+<img width="1865" height="495" alt="Screenshot 4A - import sets for u_torontoevents2 with load run time and load completed" src="https://github.com/user-attachments/assets/e997055c-a479-4181-b213-988e39e703fb" />
+
+*Shows:* one row per load. `Load Run Time` is the JDBC fetch, `Load Completed` is the transform.
+
+**Screenshot 4B · Import Set Runs tab** — one row per execution, with counts and state
+
+> `All → Import Sets` → the import set → **Import Set Runs**
+> ([`ISET0010009`](https://dev296154.service-now.com/now/nav/ui/classic/params/target/sys_import_set.do%3Fsysparm_query%3Dnumber%3DISET0010009))
+
+<img width="1739" height="282" alt="Screenshot 4B - Import Set Runs tab for ISET0010009" src="https://github.com/user-attachments/assets/e0bb1454-2572-4edc-aadc-2ba059c2f79c" />
+
+**Screenshot 4C · Import Set Rows tab** — what arrived, before the transform
+
+> Same import set → **Import Set Rows**
+
+<img width="1649" height="491" alt="Screenshot 4C - Import Set Rows tab for ISET0010009" src="https://github.com/user-attachments/assets/c540fc10-feaf-4a1e-8f2c-f87adacf7bea" />
+
+### Step 5 — the delta behaviour on the *second* load
+
+**Screenshot 5A · 598 rows, all Ignored** — looks like a failure, isn't one
+
+> Same list as `4A`, next run
+
+<img width="1895" height="146" alt="Screenshot 5A - import set showing 598 rows, all ignored" src="https://github.com/user-attachments/assets/d73b3339-1f12-416a-8675-23113c5897e5" />
+
+*Why only 598:* the previous 8,235-row load saved `2026-11-01 12:09:41` as *Last run datetime*, so the next query
+asked for `last_updated >= '2026-11-01 12:09:41'` — and exactly 598 Toronto rows carry that timestamp.
+
+*Why all 598 were Ignored:* the transform matched each row on `event_id` (the coalesce key), found the existing
+record, saw no changed values, and skipped the update. No duplicates, no writes.
+
+*It will repeat:* with `>=`, every later load re-fetches rows stamped exactly at the saved time and ignores them
+again. Harmless.
+
+How it was verified — the grouped query is the answer, because it shows those 598 rows sharing one `last_updated`
+(the watermark the import picked up). Password kept out of the command line:
+
+```powershell
+$env:MYSQL_PWD = '<password>'
+& 'C:\Program Files\MySQL\MySQL Server 8.0\bin\mysql.exe' -h mysql.50webs.com -u ejaguiar1_events `
+  --connect-timeout=20 ejaguiar1_events -e "
+    SELECT COUNT(*) total, MAX(last_updated) max_lu FROM events_log WHERE location LIKE '%Toronto%';
+    SELECT last_updated, COUNT(*) n FROM events_log WHERE location LIKE '%Toronto%'
+      GROUP BY last_updated ORDER BY last_updated DESC LIMIT 8;
+    SELECT pull_timestamp, events_count, source, notes FROM event_pulls ORDER BY id DESC LIMIT 5;"
+Remove-Item Env:\MYSQL_PWD
+```
+
+To confirm the *full* load instead, open **Transform History** for the earlier 8,235-row import set (a different
+`ISET` number) — it should show ~8,235 inserts.
+
+### Step 6 — schedule it
+
+**Screenshot 6A · Scheduled Import on the data source**
+
+> `All → System Import Sets → Data Sources` → `torontoeventsv2` → **Scheduled Import** (creates a `sys_trigger`)
+
+<img width="1774" height="184" alt="Screenshot 6A - Scheduled Import link on the data source form" src="https://github.com/user-attachments/assets/05ec935d-64b2-4715-8b2b-4045a3bfc17a" />
+
+**Screenshot 6B · the trigger record** — daily at midnight, run through the MID
+
+> [`sys_trigger` record](https://dev296154.service-now.com/now/event_jobs/record/sys_trigger/27dfc069c3d09750310abf0d050131e2)
+
+<img width="1687" height="597" alt="Screenshot 6B - scheduled import trigger, daily at midnight" src="https://github.com/user-attachments/assets/325cc74c-7853-4e55-b853-770e08699202" />
 
 ---
 
