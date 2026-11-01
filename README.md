@@ -170,7 +170,39 @@ mysql -h mysql.50webs.com -u ejaguiar1_events -p -e \
 | Main table | `events_log` (one row per event) |
 | Bookkeeping | `event_pulls` (one row per ingest run), `stats_summary` (key/value counters), `event_sources`, `event_title_index` |
 
-### Linux
+### Connecting — the two rules that trip everyone up
+
+**Rule 1 — no space after `-p`.** `-p` on its own means *"prompt me for the password"*. `-pSECRET` means *"use
+SECRET"*. `-p SECRET` (with a space) means *"prompt me, and hand `SECRET` over as the next positional argument"* —
+and the positional argument that follows is the **database name**. That is why a command that looks correct fails
+with `Unknown database '...'` or `Table 'events_log' doesn't exist`.
+
+*(ELI5: `-p` is a sticky label, not a flag with a value. Whatever is glued to it is the password; whatever comes
+after a space is a different passenger — the database.)*
+
+**Rule 2 — the last bare word is the database.** Either name the database as the final argument, or fully qualify
+every table as `database.table`:
+
+```bash
+mysql -h mysql.50webs.com -u ejaguiar1_events -pPASS ejaguiar1_events
+#                                                         ^^^^^^^^^^^^^^^^ DB selected -> events_log works
+
+mysql -h mysql.50webs.com -u ejaguiar1_events -pPASS -e "SELECT * FROM ejaguiar1_events.events_log LIMIT 5;"
+#                                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no DB selected -> fully qualify
+```
+
+Those two rules explain the confusing case: write `-p MYPASS` and `MYPASS` is swallowed as the *database name*, so
+the client ends up with **no database selected** and every unqualified table fails — which pushes you into the
+`db.table` form for the rest of the session. Both of the things below are the same bug wearing two hats:
+
+```powershell
+# how it looks when it goes wrong
+.\mysql -h mysql.50webs.com -u ejaguiar1_events -p MYPASS -e "SELECT * FROM events_log;"
+#   ERROR 1049 (42000): Unknown database 'MYPASS'          <- the space after -p
+#   ERROR 1146 (42S02): Table 'events_log' doesn't exist    <- no database selected
+```
+
+### Linux / macOS
 
 The `mysql` client must be on `PATH`:
 
@@ -179,23 +211,44 @@ sudo apt-get update && sudo apt-get install -y default-mysql-client   # Debian/U
 mysql --version
 ```
 
-Connect without putting the password on the command line (`-p` prompts; an inline
-`-pPASSWORD` ends up in shell history and `ps`):
+Interactive session — `-p` prompts, so the password never reaches shell history or the process list:
 
 ```bash
 mysql -h mysql.50webs.com -u ejaguiar1_events -p ejaguiar1_events
 ```
 
-One-shot query, no interactive session:
+One-shot query, no interactive session (fully qualified, because `-e` with `-p` leaves no room for a database
+argument when the password is typed at the prompt):
 
 ```bash
 mysql -h mysql.50webs.com -u ejaguiar1_events -p -e \
   "SELECT COUNT(*) AS total FROM ejaguiar1_events.events_log;"
 ```
 
-### Windows
+### Windows — PowerShell (what you get from the Start menu)
 
-`mysql.exe` is not on `PATH` by default on a stock install — call it by full path:
+`mysql.exe` is not on `PATH` on a stock install, so call it by full path. In PowerShell the continuation character is
+a **backtick**, *not* `^` — `^` is cmd.exe syntax and does nothing here:
+
+```powershell
+& "C:\Program Files\MySQL\MySQL Server 8.0\bin\mysql.exe" `
+  -h mysql.50webs.com -u ejaguiar1_events -p `
+  -e "SELECT * FROM ejaguiar1_events.events_log LIMIT 5;"
+```
+
+Or `cd` into the bin directory and use `.\mysql`, which is the same thing with less typing:
+
+```powershell
+cd "C:\Program Files\MySQL\MySQL Server 8.0\bin"
+.\mysql -h mysql.50webs.com -u ejaguiar1_events -p -e "SELECT * FROM ejaguiar1_events.events_log LIMIT 5;"
+```
+
+Two PowerShell-specific notes:
+
+- Keep the SQL in **double quotes**. Unquoted, PowerShell treats `;` as the end of a statement and splits your query.
+- Use backtick + newline for multi-line commands; after a backtick there must be **no trailing space**.
+
+### Windows — cmd.exe
 
 ```bat
 "C:\Program Files\MySQL\MySQL Server 8.0\bin\mysql.exe" ^
@@ -203,11 +256,45 @@ mysql -h mysql.50webs.com -u ejaguiar1_events -p -e \
   -e "SELECT * FROM ejaguiar1_events.events_log LIMIT 5;"
 ```
 
-Or add `C:\Program Files\MySQL\MySQL Server 8.0\bin` to `PATH` and use the same commands as Linux.
+Here `^` *is* the continuation character (and it does nothing in PowerShell), so the two above are not
+interchangeable. Adding `C:\Program Files\MySQL\MySQL Server 8.0\bin` to `PATH` lets every command in this repo be
+typed as plain `mysql`.
+
+### Inline passwords: `-pPASS` works, and is a bad habit
+
+```powershell
+& mysql.exe -h mysql.50webs.com -u ejaguiar1_events -pPASS -e "SELECT 1;"   # no space after -p
+```
+
+It works, and it also lands in PowerShell history (`Get-Content (Get-PSReadLineOption).HistorySavePath`), in Bash
+history, in `ps` output and in the Windows process list for as long as the query runs. For a shared or scripted
+client, use an options file instead — `--defaults-extra-file` must be the **first** option:
+
+```ini
+# %APPDATA%\MySQL\.my.cnf   (Linux/macOS: ~/.my.cnf, chmod 600)
+[client]
+host=mysql.50webs.com
+user=ejaguiar1_events
+password=REDACTED
+```
+
+```bash
+mysql --defaults-extra-file="$HOME/.my.cnf" -e "SELECT COUNT(*) FROM ejaguiar1_events.events_log;"   # Linux
+mysql --defaults-extra-file="%APPDATA%\MySQL\.my.cnf" -e "SELECT COUNT(*) FROM ejaguiar1_events.events_log;"   # cmd.exe
+```
+
+**Password characters that need care:** `%` is an environment-variable marker in `cmd.exe` (double it: `%%`), `$`
+and backticks expand inside PowerShell double quotes, and `!` is history expansion in interactive Bash. None of this
+matters with `-p` (prompt) or an options file, which is the real reason to prefer them.
 
 ### Queries worth knowing
 
+The block below starts with `USE`, so the unqualified table names work. For a one-shot `-e` query without
+that line, fully qualify them (`ejaguiar1_events.events_log`).
+
 ```sql
+USE ejaguiar1_events;
+
 -- how many events, and are any duplicated?
 SELECT COUNT(*) AS total, COUNT(DISTINCT event_id) AS unique_events FROM events_log;
 
