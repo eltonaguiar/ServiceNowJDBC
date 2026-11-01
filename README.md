@@ -79,6 +79,7 @@ Linux is the primary platform here. The full MID Server install/repair runbook l
 
 ## Contents
 
+- [A. Build order — how the JDBC import was wired](#a-build-order--how-the-jdbc-import-was-wired)
 - [1. Events database (MySQL)](#1-events-database-mysql)
   - [How the import stays idempotent (and only takes newer rows)](#how-the-import-stays-idempotent-and-only-takes-newer-rows)
   - [Linux](#linux) · [Windows](#windows) · [Queries worth knowing](#queries-worth-knowing)
@@ -90,6 +91,73 @@ Linux is the primary platform here. The full MID Server install/repair runbook l
   - [The three layers](#the-three-layers-top-to-bottom) · [See the full configuration](#see-the-full-configuration-the-servicesmsc-path-detail)
   - [GUI route](#gui-route-optional-for-people-who-prefer-a-file-manager) · [Changing it](#changing-the-configuration)
 - [5. Troubleshooting quick table](#5-troubleshooting-quick-table)
+
+---
+
+## A. Build order — how the JDBC import was wired
+
+The import is a chain, and every link is a record: **data source → import set table → transform map → target table →
+scheduled import**. Build in that order; nothing below depends on a later step.
+
+| # | Page (breadcrumb) | What we did | Why here | Checkpoint |
+|---|---|---|---|---|
+| 1 | **All → System Import Sets → Data Sources → New** | `torontoeventsv2`: type **JDBC**, driver `org.mariadb.jdbc.Driver`, `jdbc:mysql://mysql.50webs.com:3306/ejaguiar1_events`, user `ejaguiar1_events`, **MID `win11-mid`**, Query = *Specific SQL* | nothing runs without a source | **Test Load 20 Records** returns columns |
+| 2 | (same form) *Use last run datetime* + *Last run database field* | `true` + `last_updated` | this is what makes the import incremental | the preview shows `last_updated >= …` appended |
+| 3 | (same form) *Import set table name* | `u_torontoevents2` | rows land in staging before any transform | staging table exists after a test load |
+| 4 | **All → System Import Sets → Transform Maps → New** | `TorontoEventsTransformMap`: `u_torontoevents2` → `u_torontoeventsfinal`, **Mapping Assist** for the 5 fields, **coalesce `u_event_id`**, date format `yyyy-MM-dd HH:mm:ss` | final shape + the dedupe key | **Run Transform** moves the test rows |
+| 5 | **All → System Definition → Tables** | target `u_torontoeventsfinal`: `u_event_id` string(64), `u_title`/`u_location` string(500), `u_event_date` date/time, `u_last_updated` **string(40)** | the transform needs the columns before it can map them | dictionary lists all five |
+| 6 | Data source form → **Scheduled Import** (Run / Time) | daily | hands the cadence to the platform | one `sys_import_set_run` row per run |
+| 7 | **All → System Import Sets → Import Sets** | read the `TH…` history | the only place showing inserted vs updated per run | `state = complete`, counts sane |
+
+Roles: `import_admin`/`admin` to build. The MID must reach the database host on **3306** — the SQL runs from the MID's
+network, not the instance's.
+
+**Parameters to consider**
+
+| Parameter | Where | Why it matters |
+|---|---|---|
+| Query type (*All rows* vs *Specific SQL*) | data source | *Specific SQL* is the only mode where the watermark append is predictable |
+| JDBC driver + URL | data source | `org.mariadb.jdbc.Driver` for MySQL 8 / MariaDB; a wrong driver gives "no suitable driver" |
+| MID Server | data source | chooses the network the query runs from |
+| *Use last run datetime* + *Last run database field* | data source | incremental sync with no code |
+| *Import set table* | data source | staging; big loads fill it until housekeeping runs |
+| Coalesce field | transform entry | the idempotency key — wrong here and every run duplicates |
+| Date format | transform entry | `yyyy-MM-dd HH:mm:ss`; a mismatch silently nulls dates |
+| Run business rules | transform map | expensive at 10 K rows — off unless you need them |
+| Transform order | transform map | only matters with multiple maps on one staging table |
+
+**Things to watch out for**
+
+- **The SQL must return the watermark column.** Drop `last_updated` from the `SELECT` and the delta has nothing to
+  compare — you get full loads that look like deltas.
+- **Never filter on the watermark yourself** (no `WHERE last_updated > …` inside `sql_statement`); ServiceNow appends
+  its own condition and the two fight.
+- **Remote MySQL grants.** The MID connects from its own host, so the DB user needs a grant for that IP
+  (`'user'@'%'` or the MID subnet). `Access denied` here is usually a grant problem, not a password problem.
+- **`u_last_updated` is a string.** It carries MySQL's text verbatim — compare/parse in a transform script, not on the
+  column.
+- **The first run after enabling the watermark is a full load** (`last_run_datetime` starts empty). That is correct,
+  and it is why the coalesce key must exist *before* the first run.
+- **Clearing the watermark** re-delivers everything: harmless with coalesce, catastrophic without it.
+
+**Validation — four checks, with numbers from this instance**
+
+```bash
+# 1 did it run, and how long did it take?
+curl -s -u "$SN_USER:$SN_PASS" "https://<instance>/api/now/table/sys_import_set_run?sysparm_limit=5&sysparm_fields=number,state,sys_created_on,completed"
+#   TH0001006 | complete | 2026-11-01 12:39:29 | 12:39:31   (~2 s)
+
+# 2 duplicates in the target? total vs grouped count must be equal
+curl -s -u "$SN_USER:$SN_PASS" "https://<instance>/api/now/stats/u_torontoeventsfinal?sysparm_count=true&sysparm_group_by=u_event_id&sysparm_max_rows=50000"
+#   number of groups == total rows  => coalesce is working
+
+# 3 is the watermark advancing?
+curl -s -u "$SN_USER:$SN_PASS" "https://<instance>/api/now/table/sys_data_source?sysparm_query=name=torontoeventsv2&sysparm_fields=name,last_run_datetime,use_last_run_datetime,last_run_database_field"
+
+# 4 does the source agree with what landed?
+mysql -h mysql.50webs.com -u ejaguiar1_events -p -e \
+  "SELECT COUNT(*) AS src_rows, MAX(last_updated) AS src_max FROM ejaguiar1_events.events_log WHERE location LIKE '%Toronto%';"
+```
 
 ---
 
