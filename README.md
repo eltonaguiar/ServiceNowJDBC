@@ -7,6 +7,22 @@ a live instance — the screenshots are the real configuration, not a diagram of
 Linux is the primary platform. The full MID Server install/repair runbook lives in
 [`eltonaguiar/ServiceNowMidServer`](https://github.com/eltonaguiar/ServiceNowMidServer).
 
+## Before you start — prerequisites checklist
+
+Tick these off before step 1. Everything here is a hard prerequisite unless marked optional — the common
+failures are a missing item from this list, not a step done wrong.
+
+- [ ] MySQL credentials for the **source**, plus a **grant for the MID's IP** (`'user'@'%'` or the MID subnet). A user
+      that works from `localhost` is still denied when the MID connects
+- [ ] Network path: the MID host can reach `mysql.50webs.com:3306` (`nc -vz mysql.50webs.com 3306` from the MID box)
+- [ ] A **MID Server** showing *Validated: Yes* (`win11-mid` here) — the SQL runs from *its* network, not the instance's
+- [ ] Roles `import_admin` / `admin` on the instance
+- [ ] The SQL ready, **including `last_updated`** in the `SELECT`, and with **no `ORDER BY` and no trailing `;`**
+- [ ] Target table name agreed (`u_torontoeventsfinal`) and its column types decided before you build the transform map
+- [ ] `mysql` client installed locally if you want to verify row counts from the source side
+
+---
+
 ## Contents
 
 - [A. Build order — how the JDBC import was wired](#a-build-order--how-the-jdbc-import-was-wired) — the records to
