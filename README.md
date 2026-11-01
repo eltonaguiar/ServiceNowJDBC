@@ -80,6 +80,7 @@ Linux is the primary platform here. The full MID Server install/repair runbook l
 ## Contents
 
 - [1. Events database (MySQL)](#1-events-database-mysql)
+  - [How the import stays idempotent (and only takes newer rows)](#how-the-import-stays-idempotent-and-only-takes-newer-rows)
   - [Linux](#linux) · [Windows](#windows) · [Queries worth knowing](#queries-worth-knowing)
 - [2. MID Server on Linux (Docker, ARM64 / NVIDIA GX10)](#2-mid-server-on-linux-docker-arm64--nvidia-gx10)
   - [Is it actually down?](#is-it-actually-down) · [The fix](#the-fix) · [Verify](#verify)
@@ -172,6 +173,40 @@ Gotchas:
 - `categories` and `tags` are JSON stored in `text`; filter with `JSON_CONTAINS` / `LIKE`, not `=`.
 - `COUNT(*)` can differ from the number of unique events in `events.json` by a few rows —
   the published feed itself contains duplicate `id` values, and `event_id` is the dedupe key.
+
+### How the import stays idempotent (and only takes newer rows)
+
+The pipeline is MySQL → MID → import set → transform map → table, and it never re-imports the whole table:
+
+| Piece | Where it lives | Value in this instance |
+|---|---|---|
+| Data source | `sys_data_source` | `torontoeventsv2`, type **JDBC**, driver `org.mariadb.jdbc.Driver`, MID `win11-mid` |
+| SQL | `sql_statement` (Query = *Specific SQL*) | `SELECT event_id,title, event_date, location,last_updated FROM events_log WHERE location LIKE '%Toronto%'` |
+| **Helper field** | `last_run_database_field` | **`last_updated`** |
+| **The one parameter** | `last_run_datetime` with `use_last_run_datetime = true` | `'2026-11-01 12:09:41'` (a single quoted datetime) |
+| Staging | `import_set_table_name` | `u_torontoevents2` |
+| Transform | `sys_transform_map` | `TorontoEventsTransformMap` — `u_torontoevents2` → `u_torontoeventsfinal` |
+| **Coalesce key** | `sys_transform_entry` | `u_event_id`, `coalesce = true` |
+
+Two mechanisms do the work, and they solve different problems:
+
+1. **Only newer rows.** With *Use last run datetime* on and the helper field set to `last_updated`,
+   ServiceNow appends `AND last_updated >= '<last_run_datetime>'` to the SQL. That one parameter is the
+   watermark — the timestamp of the last successful run — so a daily run pulls edits, not 12 K rows.
+2. **Idempotency.** The transform map **coalesces on `u_event_id`**, so a row delivered twice (overlapping
+   window, retried run, manual *Execute Now*) **updates** the existing record instead of creating a second one.
+   `COUNT(*)` and `COUNT(DISTINCT u_event_id)` stay equal however often the import runs.
+
+Gotchas:
+
+- Clearing `last_run_datetime` forces a full re-read — the recovery move after a broken window, but it
+  re-delivers everything, which is only safe because of the coalesce key.
+- The watermark compares against `last_updated` **as MySQL stores it**: keep that column `datetime` and
+  timezone-stable, or boundary rows repeat or get skipped.
+- `u_last_updated` is a **string** (max 40) on `u_torontoeventsfinal`, not a date — it carries the MySQL text
+  through unchanged, so do date maths in the transform script, not on the column.
+
+---
 
 ---
 
