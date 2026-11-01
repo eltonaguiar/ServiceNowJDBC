@@ -40,12 +40,18 @@ Full page looked like this:
 <img width="1865" height="495" alt="image" src="https://github.com/user-attachments/assets/e997055c-a479-4181-b213-988e39e703fb" />
 
 
-
 #Subsequent Import ignores 598 records.. 
 <img width="1895" height="146" alt="image" src="https://github.com/user-attachments/assets/d73b3339-1f12-416a-8675-23113c5897e5" />
 #why ignored, Checking whether 598 matches a recent `last_updated` window in the database.
 
 Ran terminal command: $env:MYSQL_PWD='events1234560'; & 'C:\Program Files\MySQL\MySQL Server 8.0\bin\mysql.exe' -h mysql.50webs.com -u ejaguiar1_events --connect-timeout=20 ejaguiar1_events -e "SELECT COUNT(*) total, MAX(last_updated) max_lu FROM events_log WHERE location LIKE '%Toronto%'; SELECT last_updated, COUNT(*) n FROM events_log WHERE location LIKE '%Toronto%' GROUP BY last_updated ORDER BY last_updated DESC LIMIT 8; SELECT pull_timestamp, events_count, source, notes FROM event_pulls ORDER BY id DESC LIMIT 5;"; Remove-Item Env:\MYSQL_PWD
+
+#Scheduled Data Imports
+https://dev296154.service-now.com/now/event_jobs/record/sys_trigger/27dfc069c3d09750310abf0d050131e2
+<img width="1774" height="184" alt="image" src="https://github.com/user-attachments/assets/05ec935d-64b2-4715-8b2b-4045a3bfc17a" />
+e.g. daily at midnight
+<img width="1687" height="597" alt="image" src="https://github.com/user-attachments/assets/325cc74c-7853-4e55-b853-770e08699202" />
+
 
 
 
