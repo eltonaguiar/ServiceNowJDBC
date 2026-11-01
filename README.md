@@ -15,6 +15,15 @@ WHERE location LIKE '%Toronto%'
 Last run datetime:'2026-11-01 12:09:41'    -->system populates after a load
 #Last run database field  :last_updated
 
+#Logs
+under this page
+https://dev296154.service-now.com/now/nav/ui/classic/params/target/sys_import_set.do%3Fsysparm_query%3Dnumber%3DISET0010009
+Import Set Runs
+<img width="1739" height="282" alt="image" src="https://github.com/user-attachments/assets/e0bb1454-2572-4edc-aadc-2ba059c2f79c" />
+Import Set Rows
+<img width="1649" height="491" alt="image" src="https://github.com/user-attachments/assets/c540fc10-feaf-4a1e-8f2c-f87adacf7bea" />
+
+
 
 Note in the SQL, you can't have ORDER BY or ; , if you are using the Last run database field, so the system will populate  Last run datetime
 "Don't add ORDER BY or a semicolon. On every run after the first, ServiceNow adds AND last_updated >= '...' ORDER BY last_updated ASC to the end of your query, so the query has to end with a condition it can add AND to. ServiceNow's own ORDER BY handles the sorting."
